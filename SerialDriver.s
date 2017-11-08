@@ -159,7 +159,9 @@ UART0_S2_NO_RXINV_BRK10_NO_LBKDETECT_CLEAR_FLAGS  EQU  0xC0
 ;31-00:CLRENA=masks for HW IRQ sources;
 ;             read:   0 = unmasked;   1 = masked
 ;             write:  0 = no effect;  1 = mask
+;22:PIT IRQ mask
 ;12:UART0 IRQ mask
+NVIC_ICER_PIT_MASK    EQU  PIT_IRQ_MASK
 NVIC_ICER_UART0_MASK  EQU  UART0_IRQ_MASK
 ;---------------------------------------------------------------
 ;NVIC_ICPR
@@ -167,7 +169,9 @@ NVIC_ICER_UART0_MASK  EQU  UART0_IRQ_MASK
 ;             read:   0 = not pending;  1 = pending
 ;             write:  0 = no effect;
 ;                     1 = change status to not pending
+;22:PIT IRQ pending status
 ;12:UART0 IRQ pending status
+NVIC_ICPR_PIT_MASK    EQU  PIT_IRQ_MASK
 NVIC_ICPR_UART0_MASK  EQU  UART0_IRQ_MASK
 ;---------------------------------------------------------------
 ;NVIC_IPR0-NVIC_IPR7
@@ -181,13 +185,33 @@ NVIC_IPR_UART0_PRI_3  EQU (UART0_IRQ_PRIORITY << UART0_PRI_POS)
 ;             read:   0 = masked;     1 = unmasked
 ;             write:  0 = no effect;  1 = unmask
 ;12:UART0 IRQ mask
+;22:PIT IRQ mask
+NVIC_ISER_PIT_MASK    EQU  PIT_IRQ_MASK
 NVIC_ISER_UART0_MASK  EQU  UART0_IRQ_MASK
 ;---------------------------------------------------------------
 UART0_C2_T_RI  EQU  (UART0_C2_RIE_MASK :OR: UART0_C2_T_R) 
-UART0_C2_TI_RI  EQU  (UART0_C2_TIE_MASK :OR: UART0_C2_T_RI) 
-	
-	
-	
+UART0_C2_TI_RI  EQU  (UART0_C2_TIE_MASK :OR: UART0_C2_T_RI)
+;---------------------------------------------------------------
+;PIT_LDVALn:  PIT load value register n
+;31-00:TSV=timer start value (period in clock cycles - 1)
+;Clock ticks for 0.01 s at 24 MHz count rate
+;0.01 s * 24,000,000 Hz = 240,000
+;TSV = 240,000 - 1
+PIT_LDVAL_10ms  EQU  239999
+;---------------------------------------------------------------
+;PIT_MCR:  PIT module control register
+;1-->    0:FRZ=freeze (continue'/stop in debug mode)
+;0-->    1:MDIS=module disable (PIT section)
+;               RTI timer not affected
+;               must be enabled before any other PIT setup
+PIT_MCR_EN_FRZ  EQU  PIT_MCR_FRZ_MASK
+;---------------------------------------------------------------
+;PIT_TCTRLn:  PIT timer control register n
+;0-->   2:CHN=chain mode (enable)
+;1-->   1:TIE=timer interrupt enable
+;1-->   0:TEN=timer enable
+PIT_TCTRL_CH_IE  EQU  (PIT_TCTRL_TEN_MASK :OR: PIT_TCTRL_TIE_MASK)
+;--------------------------------------------------------------- 
 ;Program
 ;Linker requires Reset_Handler
             AREA    MyCode,CODE,READONLY
@@ -204,14 +228,63 @@ main
 ;KL46 system startup with 48-MHz system clock
             BL      Startup
 			BL		Init_UART0_IRQ
+			BL		Init_PIT_IRQ
 			CPSIE	I
-			
 ;---------------------------------------------------------------
 ;>>>>> begin main program code <<<<<
+			MOVS		R1,#0				;R1 = 0
+			MOVS		R2,#1				;R2 = 1
+			MOVS		R3,#0x3E			;R3 = '>'
+			MOVS		R4,#0x3C			;R4 = '<'
+			LDR			R5,=RunStopWatch	;R5 = Stop Watch
+			LDR			R6,=Counter			;R6 = Counter
 			
+			LDR			R0,=Prompt1			;Loads Each Prompt and Times the input for each
+			BL			Helper
+			LDR			R0,=Prompt2
+			BL			Helper
+			LDR			R0,=Prompt3
+			BL			Helper
+			LDR			R0,=Goodbye
+			BL			PutString
+			
+			ENDP
 ;>>>>>   end main program code <<<<<
 
+
 ;>>>>>	 begin subroutine code <<<<<
+
+;Title: Lab 10 Helper Function
+;Functionality: Block of Code that is repeated 3 times
+;Input: R0 <- Prompt String
+;Output: NONE
+;Registers Modified: NONE
+
+Helper		PROC		{R0-R14}
+			PUSH		{R0-R7,LR}
+			
+			BL			PutString			;Prints the Inputted Prompt
+			BL			NewLine		
+			MOVS		R0,R3				;R0 <- '>'
+			BL			PutChar
+			STRB		R2,[R5,#0]			;Turns on the Stop Watch
+			LDR			R0,=String			;Loads the variable to hold the inputted String
+			BL			GetString
+			STRB		R1,[R5,#0]			;Turns off the Stop Watch
+			BL			PutString			;Prints the input string
+			BL			NewLine
+			MOVS		R0,R4				;R0 <- '<'
+			BL			PutChar
+			LDR			R0,[R6,#0]			;R0 <- Counter
+			BL			PutNumU	
+			LDR			R0,=multFact		;R0 <- "x 0.01 s >"
+			BL			PutString
+			BL			NewLine
+			
+			POP			{R0-R7,PC}
+			
+
+
 ;Title: UART Initialization for interrupt based serial I/O 
 ;Functionality: This subroutine prepares the board for UART input and output
 ;With the format of a Baud rate of 9600, 8 data bits, no parity
@@ -331,7 +404,100 @@ Init_UART0_IRQ  		PROC		{R0-R14}
 			POP	   		{R0-R3,PC}
 			ENDP
 
+			
+			
+;Title: Init_PIT_IRQ
+;Description: Initializes the PIT for the KL46Z Board
+;Input: None
+;Output: NONE
+;Resgister Modification List: NONE
 
+Init_PIT_IRQ	PROC	{R0-R14}
+				PUSH	{R0-R7}
+				
+				;Enable clock for PIT module             
+				LDR   	R0,=SIM_SCGC6             
+				LDR   	R1,=SIM_SCGC6_PIT_MASK             
+				LDR   	R2,[R0,#0]             
+				ORRS  	R2,R2,R1            
+				STR   	R2,[R0,#0]
+
+				;Disable PIT timer 0 
+				LDR   	R0,=PIT_CH0_BASE 
+				LDR   	R1,=PIT_TCTRL_TEN_MASK 
+				LDR   	R2,[R0,#PIT_TCTRL_OFFSET] 
+				BICS  	R2,R2,R1
+				STR   	R2,[R0,#PIT_TCTRL_OFFSET] 
+				
+				;Set PIT interrupt priority 
+				LDR     R0,=PIT_IPR 
+				LDR     R1,=NVIC_IPR_PIT_MASK 
+				;LDR     Rk,=NVIC_IPR_PIT_PRI_0 
+				LDR     R3,[R0,#0] 
+				BICS    R3,R3,R1
+				;ORRS    Rl,Rl,RkSTR     Rl,[Ri,#0] 
+				
+				;Clear any pending PIT interrupts 
+				LDR     R0,=NVIC_ICPR 
+				LDR     R1,=NVIC_ICPR_PIT_MASK 
+				STR     R1,[R0,#0]
+				
+				;Unmask PIT interrupts
+				LDR		R0,=NVIC_ISER
+				LDR		R1,=NVIC_ISER_PIT_MASK
+				STR		R1,[R0,#0]
+				
+				;Enable PIT module 
+				LDR   	R0,=PIT_BASE 
+				LDR   	R1,=PIT_MCR_EN_FRZ 
+				STR   	R1,[R0,#PIT_MCR_OFFSET] 
+				
+				;Set PIT timer 0 period for 0.01 s 
+				LDR   	R0,=PIT_CH0_BASE 
+				LDR   	R1,=PIT_LDVAL_10ms 
+				STR   	R1,[R0,#PIT_LDVAL_OFFSET 
+				
+				;Enable PIT timer 0 interrupt 
+				LDR   	R1,=PIT_TCTRL_CH_IE 
+				STR   	R1,[R0,#PIT_TCTRL_OFFSET]
+				
+				;Initialize RunStopWatch
+				LDR		R0,=RunStopWatch
+				MOVS	R1,#0
+				STRB	R1,[R0,#0]
+				LDR		R0,=Count
+				STR		R1,[R0,#0]
+				
+				POP		{R0-R7}
+				BX		LR
+
+				
+				
+;Title: PIT Interrupt Service Routine
+;Description: Increments the count if The Stop Watch is activated
+;Input:NONE
+;Output: NONE
+;No Registers Modified
+
+PIT_ISR		PROC	{R0-R14}
+			PUSH	{R0-R7}
+			
+			CPSID	I
+			MOVS	R0,=RunStopWatch
+			MOVS	R1,#0
+			CMP		R0,R1
+			BEQ		EndPIT
+			LDR		R0,=Count
+			MOVS	R1,#1
+			STR		R1,[R0,#0]
+			;Clear the PIT interrupts 
+			
+EndPIT		LDR     R0,=NVIC_ICPR 
+			LDR     R1,=NVIC_ICPR_PIT_MASK 
+			STR     R1,[R0,#0]
+			POP		{R0-R7}
+			BX		LR
+			
 ;Title: UART0 Interrupt Service Routine
 ;Description: Interrupt Service Routine that handles UART0
 ;trasmit and receive interrupts
@@ -849,7 +1015,7 @@ __Vectors
             DCD    Dummy_Handler      ;35:TPM2
             DCD    Dummy_Handler      ;36:RTC (alarm)
             DCD    Dummy_Handler      ;37:RTC (seconds)
-            DCD    Dummy_Handler      ;38:PIT (all IRQ sources)
+            DCD    PIT_ISR		      ;38:PIT (all IRQ sources)
             DCD    Dummy_Handler      ;39:I2S0
             DCD    Dummy_Handler      ;40:USB0
             DCD    Dummy_Handler      ;41:DAC0
@@ -881,6 +1047,11 @@ Q_REC_SZ  EQU    18        ;Management record size
 ;Constants
             AREA    MyConst,DATA,READONLY
 ;>>>>> begin constants here <<<<<
+Prompt1		DCB		"Enter your name.",0
+Prompt2		DCB		"Enter the date.",0
+Prompt3		DCB		"Enter the last name of a 250 lab TA",0
+multFact	DCB		" x 0.01s >",0
+Goodbye		DCB		"Thank You. Goodbye!",0
 ;>>>>>   end constants here <<<<<
             ALIGN
 ;****************************************************************
@@ -898,6 +1069,11 @@ RxRecord   SPACE  Q_REC_SZ
 			ALIGN
 Temp       SPACE  2
 			ALIGN
+RunStopWatch	SPACE	2
+			ALIGN
+Count	   SPACE  4
+			ALIGN
+String		SPACE	80
 ;>>>>>   end variables here <<<<<
             ALIGN
             END
